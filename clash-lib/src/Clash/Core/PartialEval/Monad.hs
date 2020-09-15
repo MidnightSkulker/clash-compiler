@@ -17,6 +17,8 @@ module Clash.Core.PartialEval.Monad
   ( -- * Partial Evaluation Monad
     Eval
   , runEval
+    -- * Partial Evaluation Exception
+  , EvalException(..)
     -- * Local and Global Environments
   , getLocalEnv
   , setLocalEnv
@@ -52,6 +54,7 @@ module Clash.Core.PartialEval.Monad
     -- * Accessing Global State
   , getTyConMap
   , getInScope
+  , getAddr
     -- * Fresh Variable Generation
   , getUniqueId
   , getUniqueTyVar
@@ -61,7 +64,7 @@ module Clash.Core.PartialEval.Monad
 
 import           Control.Applicative (Alternative)
 import           Control.Concurrent.Supply (Supply)
-import           Control.Monad.Catch (MonadThrow, MonadCatch, MonadMask)
+import           Control.Monad.Catch (Exception, MonadThrow, MonadCatch, MonadMask)
 import           Control.Monad.IO.Class (MonadIO)
 
 #if !MIN_VERSION_base(4,13,0)
@@ -78,6 +81,7 @@ import           Clash.Core.Name (OccName)
 import           Clash.Core.PartialEval.AsTerm
 import           Clash.Core.PartialEval.NormalForm
 import           Clash.Core.Subst (Subst, mkTvSubst)
+import           Clash.Core.Term (Pat)
 import           Clash.Core.TyCon (TyConMap)
 import           Clash.Core.Type (Kind, KindOrType, Type)
 import           Clash.Core.Util (mkUniqSystemId, mkUniqSystemTyVar)
@@ -136,6 +140,28 @@ runEval g l x =
   let extract (a, g', _) = (a, g')
    in extract <$> RWS.runRWST (unEval x) l g
 {-# INLINE runEval #-}
+
+-- | Exceptions specific to partial evaluation. Note that other exceptions
+-- may still be thrown, such as ArithException or IOException.
+--
+data EvalException
+  = ArgUndefined
+    -- ^ An argument to a function / data constructor / primtive was
+    -- undefined where it was expected to be defined.
+  | CannotApply Value (Arg Value)
+    -- ^ An attempt to apply an argument to an incompatible value was made,
+    -- for instance applying to a non-function value.
+  | CannotMatch Value [Pat]
+    -- ^ An attempt to match the given value on the following patterns did
+    -- not succeed. This likely means the supplied patterns were non-exhaustive.
+  | CannotConvert Value Type
+    -- ^ An attempt to convert a value to an element of the specified type did
+    -- not succeed. This likely means a primitive failed to evaluate from not
+    -- all relevant arguments being statically known.
+  deriving (Show)
+
+instance Exception EvalException
+
 
 getLocalEnv :: Eval LocalEnv
 getLocalEnv = RWS.ask
@@ -282,6 +308,9 @@ getTyConMap = genvTyConMap <$> getGlobalEnv
 getInScope :: Eval InScopeSet
 getInScope = genvInScope <$> getGlobalEnv
 
+getAddr :: Eval Int
+getAddr = genvAddr <$> getGlobalEnv
+
 getUniqueId :: OccName -> Type -> Eval Id
 getUniqueId = getUniqueVar mkUniqSystemId
 
@@ -309,6 +338,7 @@ getUniqueVar f name ty = do
 
 workFreeValue :: Value -> Eval Bool
 workFreeValue = \case
+  VNeutral (NeVar _) -> pure True
   VNeutral _ -> pure False
   VThunk x _ -> do
     bindings <- fmap (fmap asTerm) . genvBindings <$> getGlobalEnv

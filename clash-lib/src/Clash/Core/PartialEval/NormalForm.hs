@@ -19,10 +19,12 @@ module Clash.Core.PartialEval.NormalForm
   , Args
   , Neutral(..)
   , Value(..)
+  , collectValueApps
   , mkValueTicks
   , stripValue
   , collectValueTicks
   , renameValue
+  , isUndefined
   , Normal(..)
   , LocalEnv(..)
   , GlobalEnv(..)
@@ -38,7 +40,7 @@ import Data.Map.Strict (Map)
 import Clash.Core.DataCon (DataCon)
 import Clash.Core.Literal
 import Clash.Core.Subst
-import Clash.Core.Term (Term(..), PrimInfo, TickInfo, Pat)
+import Clash.Core.Term (Term(..), PrimInfo(..), TickInfo, Pat)
 import Clash.Core.TyCon (TyConMap)
 import Clash.Core.Type (Type, TyVar)
 import Clash.Core.Var (Id)
@@ -101,6 +103,16 @@ data Value
   | VThunk    !Term !LocalEnv
   deriving (Show)
 
+collectValueApps :: Value -> Maybe (Neutral Value, Args Value)
+collectValueApps (VNeutral n) = Just (go [] n)
+ where
+  go !args = \case
+    NeApp x y -> go (Left y : args) x
+    NeTyApp x ty -> go (Right ty : args) x
+    neu -> (neu, args)
+
+collectValueApps _ = Nothing
+
 mkValueTicks :: Value -> [TickInfo] -> Value
 mkValueTicks = foldl VTick
 
@@ -113,6 +125,20 @@ collectValueTicks = go []
   go !acc = \case
     VTick v tick -> go (tick : acc) v
     value -> (value, acc)
+
+isUndefined :: Value -> Bool
+isUndefined = \case
+  VNeutral (NePrim pr [Right _a]) ->
+    primName pr `elem`
+      [ "Control.Exception.Base.absentError"
+      , "Control.Exception.Base.patError"
+      , "EmptyCase"
+      , "GHC.Err.undefined"
+      , "Clash.Transformations.undefined"
+      , "Clash.XException.errorX"
+      ]
+
+  _ -> False
 
 -- | Rename all occurances of the variables which appear as keys in the input
 -- list. This is used to deShadow values, as we do not have a substitution
